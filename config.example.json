@@ -1,0 +1,8 @@
+{
+  "_comment": "复制此文件为 config.json 并修改以下配置",
+  "lark_cli_path": "~/bin/lark-cli",
+  "obsidian_vault_path": "~/你的Obsidian仓库路径",
+  "feishu_user_open_id": "ou_你的open_id",
+  "feishu_user_name": "你的飞书用户名（仅用于显示）",
+  "check_interval_minutes": 10
+}
