@@ -170,6 +170,16 @@ def main():
     if intent == "skip":
         print("  ⏭️  用户选择跳过", file=sys.stderr)
         send_reply(chat_id, "👌 已跳过本次同步，需要时手动运行同步。")
+        # 记录跳过，避免 notify 重复通知同一批变更
+        from scripts.sync import load_state, save_state, STATE_FILE
+        state = load_state()
+        skipped = state.get("skipped_tokens", [])
+        for key in ("new", "modified", "deleted"):
+            for f in pending.get("report", {}).get(key, []):
+                if f.get("token") and f["token"] not in skipped:
+                    skipped.append(f["token"])
+        state["skipped_tokens"] = skipped[-200:]  # 保留最近 200 个
+        save_state(state)
         try:
             os.remove(PENDING_FILE)
         except FileNotFoundError:

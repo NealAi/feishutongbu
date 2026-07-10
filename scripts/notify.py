@@ -134,7 +134,7 @@ def main():
     print(f"  📊 变更: 新增{len(report['new'])} 修改{len(report['modified'])} "
           f"删除{len(report['deleted'])}", file=sys.stderr)
 
-    # 去重：相同变更不重复发
+    # 去重 1：pending 中有相同变更 → 不重复发
     if os.path.exists(PENDING_FILE):
         with open(PENDING_FILE) as f:
             existing = json.load(f)
@@ -146,6 +146,16 @@ def main():
         )
         if existing.get("notified") and same and not existing.get("confirmed"):
             print("  ⏭️  已有相同待确认通知，跳过", file=sys.stderr)
+            return
+
+    # 去重 2：变更 token 全部在 skipped_tokens 中 → 不重复通知
+    all_tokens = {f["token"] for f in report["new"] + report["modified"]}
+    all_tokens |= {f["token"] for f in report["deleted"]}
+    if all_tokens:
+        state = load_state()
+        skipped = set(state.get("skipped_tokens", []))
+        if all_tokens.issubset(skipped):
+            print("  ⏭️  所有变更此前已被跳过，不重复通知", file=sys.stderr)
             return
 
     message = build_change_message(report)
