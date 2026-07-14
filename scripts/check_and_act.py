@@ -121,37 +121,104 @@ def run_sync(approve_categories):
 def main():
     print("🔄 飞书同步检查...", file=sys.stderr)
 
-    # 无待处理 → 检测变更
+    # === 始终先扫描当前云盘变更 ===
+    from scripts.notify import scan_changes, build_change_message, send_feishu_message
+
+    current_report = scan_changes()
+    cur_new = {f["token"] for f in current_report["new"]}
+    cur_modified = {f["token"] for f in current_report["modified"]}
+    cur_deleted = {f["token"] for f in current_report["deleted"]}
+    cur_total = len(cur_new) + len(cur_modified) + len(cur_deleted)
+
+    # === 无待处理 → 发送通知 ===
     if not os.path.exists(PENDING_FILE):
-        print("  📋 无待处理通知，检查是否有新变更...", file=sys.stderr)
-        subprocess.run(["python3", NOTIFY_SCRIPT], timeout=300)
+        if cur_total == 0:
+            print("  ✅ 无变更", file=sys.stderr)
+        else:
+            print(f"  📊 新人新变更，发送通知...", file=sys.stderr)
+            subprocess.run(["python3", NOTIFY_SCRIPT], timeout=300)
         return
 
     with open(PENDING_FILE) as f:
         pending = json.load(f)
 
-    # 已确认执行过的 → 跳过
+    # 已确认 → 清理
     if pending.get("confirmed"):
-        print("  ✅ 已完成确认的变更，清理中...", file=sys.stderr)
+        print("  ✅ 清理已完成的通知...", file=sys.stderr)
         try:
             os.remove(PENDING_FILE)
         except FileNotFoundError:
             pass
+        # 如果有新变更，重新 notify
+        if cur_total > 0:
+            subprocess.run(["python3", NOTIFY_SCRIPT], timeout=300)
         return
 
     chat_id = pending.get("chat_id", "")
     created_at = pending.get("created_at", "")
     if not chat_id or not created_at:
         print("  ⚠️  旧版待处理文件，重新扫描...", file=sys.stderr)
-        os.remove(PENDING_FILE)
-        subprocess.run(["python3", NOTIFY_SCRIPT], timeout=300)
+        try:
+            os.remove(PENDING_FILE)
+        except FileNotFoundError:
+            pass
+        if cur_total > 0:
+            subprocess.run(["python3", NOTIFY_SCRIPT], timeout=300)
         return
 
-    # 读取用户回复
+    # === 比较新旧变更，有新变更就更新通知 ===
+    pending_report = pending.get("report", {})
+    pending_new = {f["token"] for f in pending_report.get("new", [])}
+    pending_modified = {f["token"] for f in pending_report.get("modified", [])}
+    pending_deleted = {f["token"] for f in pending_report.get("deleted", [])}
+
+    # 新变更 = 当前有但 pending 没有
+    added_new = cur_new - pending_new
+    added_modified = cur_modified - pending_modified
+    added_deleted = cur_deleted - pending_deleted
+    added_total = len(added_new) + len(added_modified) + len(added_deleted)
+
+    # 已过期的变更 = pending 有但当前已无（用户删了又恢复了等）
+    stale_new = pending_new - cur_new
+    stale_modified = pending_modified - cur_modified
+    stale_deleted = pending_deleted - cur_deleted
+
+    if added_total > 0:
+        print(f"  🔔 有 {added_total} 项新变更，更新待处理通知...", file=sys.stderr)
+        # 构建仅有新变更的简短报告
+        mini_report = {
+            "new": [f for f in current_report["new"] if f["token"] in added_new],
+            "modified": [f for f in current_report["modified"] if f["token"] in added_modified],
+            "deleted": [f for f in current_report["deleted"] if f["token"] in added_deleted],
+        }
+        followup = build_change_message(mini_report)
+        followup = followup.replace("飞书云盘变更提醒", "飞书云盘新增变更（补充）")
+        send_reply(chat_id, followup)
+
+        # 更新 pending 报告，合并新旧变更
+        merged_report = {
+            "new": [f for f in current_report["new"] if f["token"] in pending_new | added_new],
+            "modified": [f for f in current_report["modified"] if f["token"] in pending_modified | added_modified],
+            "deleted": [f for f in current_report["deleted"] if f["token"] in pending_deleted | added_deleted],
+        }
+        pending["report"] = merged_report
+        pending["created_at"] = datetime.now(timezone.utc).isoformat()
+        with open(PENDING_FILE, "w") as f:
+            json.dump(pending, f, indent=2, ensure_ascii=False)
+
+    # === 读取用户回复 ===
     print(f"  📩 检查用户回复...", file=sys.stderr)
     replies = read_user_replies(chat_id, created_at)
     if not replies:
-        print("  ⏳ 用户尚未回复", file=sys.stderr)
+        if cur_total == 0:
+            # 变更已过期（用户在飞书手动同步了），清理 pending
+            print("  ⏳ 无新回复，且变更已过期，清理待处理", file=sys.stderr)
+            try:
+                os.remove(PENDING_FILE)
+            except FileNotFoundError:
+                pass
+        else:
+            print("  ⏳ 用户尚未回复", file=sys.stderr)
         return
 
     latest = replies[-1]
